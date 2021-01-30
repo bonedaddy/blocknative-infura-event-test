@@ -7,6 +7,9 @@ import (
 	"sync"
 	"syscall"
 
+	bindings "github.com/bonedaddy/blocknative-infura-event-test/bindings/pool"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/urfave/cli/v2"
 	"go.bobheadxi.dev/zapx/zapx"
 	"go.uber.org/zap"
@@ -85,10 +88,9 @@ func main() {
 					blockLogger.Info("exiting, goodbye...")
 				}()
 				go func() {
+
 					defer wg.Done()
-					infuraLogger.Info("starting infura logger")
-					<-ctx.Done()
-					infuraLogger.Info("exiting, goodbye...")
+					infuraListen(ctx, c, infuraLogger)
 				}()
 				<-ch
 				cancel()
@@ -101,4 +103,36 @@ func main() {
 		logger.Fatal("failed to run app", zap.Error(err))
 	}
 
+}
+
+func infuraListen(ctx context.Context, c *cli.Context, infuraLogger *zap.Logger) {
+	client, err := ethclient.Dial("wss://mainnet.infura.io/ws/v3/" + c.String("infura.api_key"))
+	if err != nil {
+		infuraLogger.Error("failed to get infura client", zap.Error(err))
+		return
+	}
+	contract, err := bindings.NewPoolbindings(common.HexToAddress(c.String("defi5.address")), client)
+	if err != nil {
+		infuraLogger.Error("failed to get contract bindings", zap.Error(err))
+		return
+	}
+	ch := make(chan *bindings.PoolbindingsLOGSWAP)
+	sub, err := contract.WatchLOGSWAP(nil, ch, nil, nil, nil)
+	if err != nil {
+		infuraLogger.Error("failed to get LOGSWAP subscription", zap.Error(err))
+		return
+	}
+	infuraLogger.Info("starting infura event watcher")
+	for {
+		select {
+		case err := <-sub.Err():
+			infuraLogger.Error("error parsing event", zap.Error(err))
+			continue
+		case evLog := <-ch:
+			infuraLogger.Info("found new event", zap.Any("log", evLog))
+		case <-ctx.Done():
+			infuraLogger.Info("exiting, goodbye...")
+			return
+		}
+	}
 }
