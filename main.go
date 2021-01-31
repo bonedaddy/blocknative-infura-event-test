@@ -225,17 +225,14 @@ func blocknativeListen(ctx context.Context, c *cli.Context, blockLogger *zap.Log
 		if err := bclient.ReadJSON(&out); err != nil {
 			// used to ignore the following event
 			// websocket: close 1005 (no status)
-			if websocket.IsUnexpectedCloseError(err, 1005) {
+			if websocket.IsUnexpectedCloseError(err) {
 				blockLogger.Warn("received unexpected closed running reinit", zap.Error(err))
 				if err = bclient.ReInit(); err != nil {
 					blockLogger.Error("failed to recover reinit exiting", zap.Error(err))
 					return
 				}
+				blockLogger.Warn("recovered with reinit continuing")
 				// recovered successfully
-				continue
-			} else {
-				blockLogger.Warn("receive expected close message", zap.Error(err))
-				// todo: reinit
 				continue
 			}
 		}
