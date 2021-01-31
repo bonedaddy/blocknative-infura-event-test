@@ -8,15 +8,55 @@ import (
 	"syscall"
 
 	bindings "github.com/bonedaddy/blocknative-infura-event-test/bindings/pool"
+	"github.com/bonedaddy/go-blocknative/client"
+	blockclient "github.com/bonedaddy/go-blocknative/client"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/gorilla/websocket"
 	"github.com/urfave/cli/v2"
 	"go.bobheadxi.dev/zapx/zapx"
 	"go.uber.org/zap"
 )
 
 var (
-	logger *zap.Logger
+	logger     *zap.Logger
+	logSwapABI = `{
+		"anonymous": false,
+		"inputs": [
+		  {
+			"indexed": true,
+			"internalType": "address",
+			"name": "caller",
+			"type": "address"
+		  },
+		  {
+			"indexed": true,
+			"internalType": "address",
+			"name": "tokenIn",
+			"type": "address"
+		  },
+		  {
+			"indexed": true,
+			"internalType": "address",
+			"name": "tokenOut",
+			"type": "address"
+		  },
+		  {
+			"indexed": false,
+			"internalType": "uint256",
+			"name": "tokenAmountIn",
+			"type": "uint256"
+		  },
+		  {
+			"indexed": false,
+			"internalType": "uint256",
+			"name": "tokenAmountOut",
+			"type": "uint256"
+		  }
+		],
+		"name": "LOG_SWAP",
+		"type": "event"
+	}`
 )
 
 func main() {
@@ -83,12 +123,9 @@ func main() {
 				wg.Add(2)
 				go func() {
 					defer wg.Done()
-					blockLogger.Info("starting blocknative event watcher")
-					<-ctx.Done()
-					blockLogger.Info("exiting, goodbye...")
+					blocknativeListen(ctx, c, blockLogger)
 				}()
 				go func() {
-
 					defer wg.Done()
 					infuraListen(ctx, c, infuraLogger)
 				}()
@@ -134,5 +171,74 @@ func infuraListen(ctx context.Context, c *cli.Context, infuraLogger *zap.Logger)
 			infuraLogger.Info("exiting, goodbye...")
 			return
 		}
+	}
+}
+
+func blocknativeListen(ctx context.Context, c *cli.Context, blockLogger *zap.Logger) {
+	bclient, err := blockclient.New(ctx, blockclient.Opts{
+		Scheme: c.String("blocknative.scheme"),
+		Host:   c.String("blocknative.host"),
+		Path:   c.String("blocknative.api_path"),
+		APIKey: c.String("blocknative.api_key"),
+	})
+	if err != nil {
+		blockLogger.Error("failed to get blocknative client", zap.Error(err))
+		return
+	}
+	if err := bclient.WriteJSON(
+		client.NewConfiguration(
+			client.NewBaseMessageMainnet(bclient.APIKey()),
+			client.NewConfig(
+				"global",
+				false,
+				[]string{logSwapABI},
+				nil,
+			),
+		),
+	); err != nil {
+		blockLogger.Error("failed to write blocknative client config", zap.Error(err))
+		return
+	}
+	// drain
+	var out interface{}
+	_ = bclient.ReadJSON(&out)
+	if err := bclient.WriteJSON(client.NewAddressSubscribe(
+		client.NewBaseMessageMainnet(
+			bclient.APIKey(),
+		),
+		c.String("defi5.address"),
+	)); err != nil {
+		blockLogger.Error("failed to subscribe to defi5 contract", zap.Error(err))
+		return
+	}
+	// drain
+	_ = bclient.ReadJSON(nil)
+	blockLogger.Info("starting blocknative event watcher")
+	for {
+		select {
+		case <-ctx.Done():
+			blockLogger.Info("exiting, goodbye...")
+			return
+		default:
+		}
+		var out client.EthTxPayload
+		if err := bclient.ReadJSON(&out); err != nil {
+			// used to ignore the following event
+			// websocket: close 1005 (no status)
+			if websocket.IsUnexpectedCloseError(err, 1005) {
+				blockLogger.Warn("received unexpected closed running reinit", zap.Error(err))
+				if err = bclient.ReInit(); err != nil {
+					blockLogger.Error("failed to recover reinit exiting", zap.Error(err))
+					return
+				}
+				// recovered successfully
+				continue
+			} else {
+				blockLogger.Warn("receive expected close message", zap.Error(err))
+				// todo: reinit
+				continue
+			}
+		}
+		blockLogger.Info("received event message", zap.Any("message", out))
 	}
 }
